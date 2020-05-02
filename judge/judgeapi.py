@@ -7,7 +7,7 @@ import zlib
 from django.conf import settings
 
 from judge import event_poster as event
-from django.core.cache import cache
+from judge.caching import finished_submission
 
 logger = logging.getLogger('judge.judgeapi')
 size_pack = struct.Struct('!I')
@@ -99,11 +99,7 @@ def judge_submission(submission, rejudge=False, batch_rejudge=False, judge_id=No
     else:
         if response['name'] != 'submission-received' or response['submission-id'] != submission.id:
             Submission.objects.filter(id=submission.id).update(status='IE', result='IE')
-        else: #cache of user completed problem stats must be refreshed
-            key = 'user_complete:%d' % submission.user.id
-            cache.set(key, None, 86400)
-            key = 'user_attempted:%s' % submission.user.id
-            cache.set(key, None, 86400)
+        finished_submission(submission)
         _post_update_submission(submission)
         success = True
     return success

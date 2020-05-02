@@ -68,7 +68,7 @@ class ProfileForm(ModelForm):
 
 
 class ProblemSubmitForm(ModelForm):
-    source = CharField(max_length=65536, widget=AceWidget(theme='twilight', no_ace_media=True))
+    source = CharField(max_length=4194304, widget=AceWidget(theme='twilight', no_ace_media=True))
     judge = ChoiceField(choices=(), widget=forms.HiddenInput(), required=False)
 
     def __init__(self, *args, judge_choices=(), **kwargs):
