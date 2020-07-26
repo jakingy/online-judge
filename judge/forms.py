@@ -1,21 +1,39 @@
-from operator import attrgetter
+import json
+from operator import attrgetter, itemgetter
 
 import pyotp
+import webauthn
 from django import forms
 from django.conf import settings
 from django.contrib.auth.forms import AuthenticationForm
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db.models import Q
-from django.forms import CharField, ChoiceField, Form, ModelForm
+from django.forms import BooleanField, CharField, ChoiceField, Form, ModelForm, MultipleChoiceField
 from django.urls import reverse_lazy
 from django.utils.translation import gettext_lazy as _
 
 from django_ace import AceWidget
-from judge.models import Contest, Language, Organization, PrivateMessage, Problem, Profile, Submission
+from judge.models import Contest, Language, Organization, PrivateMessage, Problem, Profile, Submission, \
+    WebAuthnCredential
 from judge.utils.subscription import newsletter_id
 from judge.widgets import HeavyPreviewPageDownWidget, MathJaxPagedownWidget, PagedownWidget, Select2MultipleWidget, \
     Select2Widget
+
+two_factor_validators_by_length = {
+    6: {
+        'regex_validator': RegexValidator('^[0-9]{6}$',
+                                          _('Two-factor authentication tokens must be 6 decimal digits.')),
+        'verify': lambda code, profile: not pyotp.TOTP(profile.totp_key)
+                                                 .verify(code, valid_window=settings.DMOJ_TOTP_TOLERANCE_HALF_MINUTES),
+        'err': _('Invalid two-factor authentication token.'),
+    },
+    16: {
+        'regex_validator': RegexValidator('^[A-Z0-9]{16}$', _('Scratch codes must be 16 base32 characters.')),
+        'verify': lambda code, profile: code not in json.loads(profile.scratch_codes),
+        'err': _('Invalid scratch code.'),
+    },
+}
 
 
 def fix_unicode(string, unsafe=tuple('\u202a\u202b\u202d\u202e')):
@@ -65,6 +83,38 @@ class ProfileForm(ModelForm):
             self.fields['organizations'].queryset = Organization.objects.filter(
                 Q(is_open=True) | Q(id__in=user.profile.organizations.all()),
             )
+        if not self.fields['organizations'].queryset:
+            self.fields.pop('organizations')
+
+
+class DownloadDataForm(Form):
+    comment_download = BooleanField(required=False, label=_('Download comments?'))
+    submission_download = BooleanField(required=False, label=_('Download submissions?'))
+    submission_problem_glob = CharField(initial='*', label=_('Filter by problem code glob:'), max_length=100)
+    submission_results = MultipleChoiceField(
+        required=False,
+        widget=Select2MultipleWidget(
+            attrs={'style': 'width: 260px', 'data-placeholder': _('Leave empty to include all submissions')},
+        ),
+        choices=sorted(map(itemgetter(0, 0), Submission.RESULT)),
+        label=_('Filter by result:'),
+    )
+
+    def clean(self):
+        can_download = ('comment_download', 'submission_download')
+        if not any(self.cleaned_data[v] for v in can_download):
+            raise ValidationError(_('Please select at least one thing to download.'))
+        return self.cleaned_data
+
+    def clean_submission_problem_glob(self):
+        if not self.cleaned_data['submission_download']:
+            return '*'
+        return self.cleaned_data['submission_problem_glob']
+
+    def clean_submission_result(self):
+        if not self.cleaned_data['submission_download']:
+            return ()
+        return self.cleaned_data['submission_result']
 
 
 class ProblemSubmitForm(ModelForm):
@@ -92,7 +142,7 @@ class EditOrganizationForm(ModelForm):
     class Meta:
         model = Organization
         fields = ['about', 'logo_override_image', 'admins']
-        widgets = {'admins': Select2MultipleWidget()}
+        widgets = {'admins': Select2MultipleWidget(attrs={'style': 'width: 200px'})}
         if HeavyPreviewPageDownWidget is not None:
             widgets['about'] = HeavyPreviewPageDownWidget(preview=reverse_lazy('organization_preview'))
 
@@ -131,17 +181,77 @@ class NoAutoCompleteCharField(forms.CharField):
 class TOTPForm(Form):
     TOLERANCE = settings.DMOJ_TOTP_TOLERANCE_HALF_MINUTES
 
-    totp_token = NoAutoCompleteCharField(validators=[
-        RegexValidator('^[0-9]{6}$', _('Two Factor Authentication tokens must be 6 decimal digits.')),
-    ])
+    totp_or_scratch_code = NoAutoCompleteCharField(required=False)
+    webauthn_response = forms.CharField(widget=forms.HiddenInput(), required=False)
 
     def __init__(self, *args, **kwargs):
-        self.totp_key = kwargs.pop('totp_key')
-        super(TOTPForm, self).__init__(*args, **kwargs)
+        self.profile = kwargs.pop('profile')
+        super().__init__(*args, **kwargs)
 
-    def clean_totp_token(self):
-        if not pyotp.TOTP(self.totp_key).verify(self.cleaned_data['totp_token'], valid_window=self.TOLERANCE):
-            raise ValidationError(_('Invalid Two Factor Authentication token.'))
+    def clean(self):
+        totp_or_scratch_code = self.cleaned_data.get('totp_or_scratch_code')
+        try:
+            validator = two_factor_validators_by_length[len(totp_or_scratch_code)]
+        except KeyError:
+            raise ValidationError(_('Invalid code length.'))
+        validator['regex_validator'](totp_or_scratch_code)
+        if validator['verify'](totp_or_scratch_code, self.profile):
+            raise ValidationError(validator['err'])
+
+
+class TwoFactorLoginForm(TOTPForm):
+    webauthn_response = forms.CharField(widget=forms.HiddenInput(), required=False)
+
+    def __init__(self, *args, **kwargs):
+        self.webauthn_challenge = kwargs.pop('webauthn_challenge')
+        self.webauthn_origin = kwargs.pop('webauthn_origin')
+        super().__init__(*args, **kwargs)
+
+    def clean(self):
+        totp_or_scratch_code = self.cleaned_data.get('totp_or_scratch_code')
+        if self.profile.is_webauthn_enabled and self.cleaned_data.get('webauthn_response'):
+            if len(self.cleaned_data['webauthn_response']) > 65536:
+                raise ValidationError(_('Invalid WebAuthn response.'))
+
+            if not self.webauthn_challenge:
+                raise ValidationError(_('No WebAuthn challenge issued.'))
+
+            response = json.loads(self.cleaned_data['webauthn_response'])
+            try:
+                credential = self.profile.webauthn_credentials.get(cred_id=response.get('id', ''))
+            except WebAuthnCredential.DoesNotExist:
+                raise ValidationError(_('Invalid WebAuthn credential ID.'))
+
+            user = credential.webauthn_user
+            # Work around a useless check in the webauthn package.
+            user.credential_id = credential.cred_id
+            assertion = webauthn.WebAuthnAssertionResponse(
+                webauthn_user=user,
+                assertion_response=response.get('response'),
+                challenge=self.webauthn_challenge,
+                origin=self.webauthn_origin,
+                uv_required=False,
+            )
+
+            try:
+                sign_count = assertion.verify()
+            except Exception as e:
+                raise ValidationError(str(e))
+
+            credential.counter = sign_count
+            credential.save(update_fields=['counter'])
+        elif self.profile.is_totp_enabled and totp_or_scratch_code:
+            if pyotp.TOTP(self.profile.totp_key).verify(totp_or_scratch_code, valid_window=self.TOLERANCE):
+                return
+            elif self.profile.scratch_codes and totp_or_scratch_code in json.loads(self.profile.scratch_codes):
+                scratch_codes = json.loads(self.profile.scratch_codes)
+                scratch_codes.remove(totp_or_scratch_code)
+                self.profile.scratch_codes = json.dumps(scratch_codes)
+                self.profile.save(update_fields=['scratch_codes'])
+                return
+            raise ValidationError(_('Invalid two-factor authentication token or scratch code.'))
+        else:
+            raise ValidationError(_('Must specify either totp_token or webauthn_response.'))
 
 
 class ProblemCloneForm(Form):

@@ -9,10 +9,6 @@
 
 {% block users_media %}
     <style>
-        #content-left {
-            overflow-x: auto;
-        }
-
         #users-table .username {
             min-width: 20em;
         }
@@ -226,12 +222,17 @@
                     url: '{{ url('contest_user_search_select2_ajax', contest.key) }}'
                 },
                 minimumInputLength: 1,
-                escapeMarkup: function (markup) {
-                    return markup;
-                },
-                templateResult: function (data, container) {
-                    return ('<img class="user-search-image" src="' + data.gravatar_url + '" width="24" height="24">' +
-                        '<span class="' + data.display_rank + ' user-search-name">' + data.text + '</span>');
+                templateResult: function (data) {
+                    return $('<span>')
+                        .append($('<img>', {
+                            class: 'user-search-image',
+                            src: data.gravatar_url,
+                            width: 24,
+                            height: 24,
+                        }))
+                        .append($('<span>', {
+                            class: data.display_rank + ' user-search-name',
+                        }).text(data.text));
                 }
             }).on('change', function () {
                 window.location.href = url.replace('__username__', $(this).val());
@@ -239,21 +240,30 @@
 
             $('#show-organizations-checkbox').click(function () {
                 $('.organization-column').toggle();
+                localStorage.setItem('show-organizations', $('.organization-column').is(':visible') ? 'true' : 'false');
             });
+            
+            if (localStorage.getItem('show-organizations') == 'true') {
+                $('.organization-column').show();
+                $('#show-organizations-checkbox').prop('checked', true);
+            }
         });
     </script>
     {% include "contest/media-js.html" %}
 {% endblock %}
 
-{% block users_table %}
+{% block before_users_table %}
     <div style="margin-bottom: 0.5em">
         {% if tab == 'participation' %}
-            {% if contest.start_time <= now or perms.judge.see_private_contest %}
+            {% if contest.can_see_full_scoreboard(request.user) %}
                 <input id="search-contest" type="text" placeholder="{{ _('View user participation') }}">
             {% endif %}
         {% endif %}
         <input id="show-organizations-checkbox" type="checkbox" style="vertical-align: bottom">
         <label for="show-organizations-checkbox" style="vertical-align: bottom">{{ _('Show organizations') }}</label>
     </div>
+{% endblock %}
+
+{% block users_table %}
     {% include "contest/ranking-table.html" %}
 {% endblock %}

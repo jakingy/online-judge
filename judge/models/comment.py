@@ -15,7 +15,7 @@ from reversion.models import Version
 
 from judge.models.contest import Contest
 from judge.models.interface import BlogPost
-from judge.models.problem import Problem
+from judge.models.problem import Problem, Solution
 from judge.models.profile import Profile
 from judge.utils.cachedict import CacheDict
 
@@ -61,12 +61,16 @@ class Comment(MPTTModel):
         queryset = cls.objects.filter(hidden=False).select_related('author__user') \
             .defer('author__about', 'body').order_by('-id')
 
-        problem_access = CacheDict(lambda code: Problem.objects.get(code=code).is_accessible_by(user))
-        contest_access = CacheDict(lambda key: Contest.objects.get(key=key).is_accessible_by(user))
-        blog_access = CacheDict(lambda id: BlogPost.objects.get(id=id).can_see(user))
+        problem_cache = CacheDict(lambda code: Problem.objects.defer('description', 'summary').get(code=code))
+        solution_cache = CacheDict(lambda code: Solution.objects.defer('content').get(problem__code=code))
+        contest_cache = CacheDict(lambda key: Contest.objects.defer('description').get(key=key))
+        blog_cache = CacheDict(lambda id: BlogPost.objects.defer('summary', 'content').get(id=id))
 
-        if user.is_superuser:
-            return queryset[:n]
+        problem_access = CacheDict(lambda code: problem_cache[code].is_accessible_by(user))
+        solution_access = CacheDict(lambda code: problem_access[code] and solution_cache[code].is_accessible_by(user))
+        contest_access = CacheDict(lambda key: contest_cache[key].is_accessible_by(user))
+        blog_access = CacheDict(lambda id: blog_cache[id].can_see(user))
+
         if batch is None:
             batch = 2 * n
         output = []
@@ -75,26 +79,27 @@ class Comment(MPTTModel):
             if not slice:
                 break
             for comment in slice:
-                if comment.page.startswith('p:') or comment.page.startswith('s:'):
-                    try:
-                        if problem_access[comment.page[2:]]:
-                            output.append(comment)
-                    except Problem.DoesNotExist:
-                        pass
-                elif comment.page.startswith('c:'):
-                    try:
-                        if contest_access[comment.page[2:]]:
-                            output.append(comment)
-                    except Contest.DoesNotExist:
-                        pass
-                elif comment.page.startswith('b:'):
-                    try:
-                        if blog_access[comment.page[2:]]:
-                            output.append(comment)
-                    except BlogPost.DoesNotExist:
-                        pass
+                page_key = comment.page[2:]
+                try:
+                    if comment.page.startswith('p:'):
+                        has_access = problem_access[page_key]
+                        comment.page_title = problem_cache[page_key].name
+                    elif comment.page.startswith('s:'):
+                        has_access = solution_access[page_key]
+                        comment.page_title = _('Editorial for %s') % problem_cache[page_key].name
+                    elif comment.page.startswith('c:'):
+                        has_access = contest_access[page_key]
+                        comment.page_title = contest_cache[page_key].name
+                    elif comment.page.startswith('b:'):
+                        has_access = blog_access[page_key]
+                        comment.page_title = blog_cache[page_key].title
+                    else:
+                        has_access = True
+                except ObjectDoesNotExist:
+                    pass
                 else:
-                    output.append(comment)
+                    if has_access:
+                        output.append(comment)
                 if len(output) >= n:
                     return output
         return output
@@ -141,6 +146,21 @@ class Comment(MPTTModel):
     @cached_property
     def page_title(self):
         return self.get_page_title(self.page)
+
+    def is_accessible_by(self, user):
+        try:
+            if self.page.startswith('p:'):
+                return Problem.objects.get(code=self.page[2:]).is_accessible_by(user)
+            elif self.page.startswith('s:'):
+                return Solution.objects.get(problem__code=self.page[2:]).is_accessible_by(user)
+            elif self.page.startswith('c:'):
+                return Contest.objects.get(key=self.page[2:]).is_accessible_by(user)
+            elif self.page.startswith('b:'):
+                return BlogPost.objects.get(id=self.page[2:]).can_see(user)
+            else:
+                return True
+        except ObjectDoesNotExist:
+            return False
 
     def get_absolute_url(self):
         return '%s#comment-%d' % (self.link, self.id)

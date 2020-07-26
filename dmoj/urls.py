@@ -15,8 +15,8 @@ from judge.feed import AtomBlogFeed, AtomCommentFeed, AtomProblemFeed, BlogFeed,
 from judge.sitemap import BlogPostSitemap, ContestSitemap, HomePageSitemap, OrganizationSitemap, ProblemSitemap, \
     SolutionSitemap, UrlSitemap, UserSitemap
 from judge.views import TitledTemplateView, api, blog, comment, contests, language, license, mailgun, organization, \
-    preview, problem, problem_manage, ranked_submission, register, stats, status, submission, tasks, ticket, totp, \
-    user, widgets
+    preview, problem, problem_manage, ranked_submission, register, stats, status, submission, tasks, ticket, \
+    two_factor, user, widgets
 from judge.views.problem_data import ProblemDataView, ProblemSubmissionDiff, \
     problem_data_file, problem_init_view
 from judge.views.register import ActivationView, RegistrationView
@@ -52,9 +52,7 @@ register_patterns = [
         name='registration_disallowed'),
     url(r'^login/$', user.CustomLoginView.as_view(), name='auth_login'),
     url(r'^logout/$', user.UserLogoutView.as_view(), name='auth_logout'),
-    url(r'^password/change/$', auth_views.PasswordChangeView.as_view(
-        template_name='registration/password_change_form.html',
-    ), name='password_change'),
+    url(r'^password/change/$', user.CustomPasswordChangeView.as_view(), name='password_change'),
     url(r'^password/change/done/$', auth_views.PasswordChangeDoneView.as_view(
         template_name='registration/password_change_done.html',
     ), name='password_change_done'),
@@ -75,9 +73,13 @@ register_patterns = [
     ), name='password_reset_done'),
     url(r'^social/error/$', register.social_auth_error, name='social_auth_error'),
 
-    url(r'^2fa/$', totp.TOTPLoginView.as_view(), name='login_2fa'),
-    url(r'^2fa/enable/$', totp.TOTPEnableView.as_view(), name='enable_2fa'),
-    url(r'^2fa/disable/$', totp.TOTPDisableView.as_view(), name='disable_2fa'),
+    url(r'^2fa/$', two_factor.TwoFactorLoginView.as_view(), name='login_2fa'),
+    url(r'^2fa/enable/$', two_factor.TOTPEnableView.as_view(), name='enable_2fa'),
+    url(r'^2fa/disable/$', two_factor.TOTPDisableView.as_view(), name='disable_2fa'),
+    url(r'^2fa/webauthn/attest/$', two_factor.WebAuthnAttestationView.as_view(), name='webauthn_attest'),
+    url(r'^2fa/webauthn/assert/$', two_factor.WebAuthnAttestView.as_view(), name='webauthn_assert'),
+    url(r'^2fa/webauthn/delete/(?P<pk>\d+)$', two_factor.WebAuthnDeleteView.as_view(), name='webauthn_delete'),
+    url(r'^2fa/scratchcode/generate/$', user.generate_scratch_codes, name='generate_scratch_codes'),
 
     url(r'api/token/generate/$', user.generate_api_token, name='generate_api_token'),
     url(r'api/token/remove/$', user.remove_api_token, name='remove_api_token'),
@@ -115,8 +117,8 @@ urlpatterns = [
         url(r'^/pdf$', problem.ProblemPdfView.as_view(), name='problem_pdf'),
         url(r'^/pdf/(?P<language>[a-z-]+)$', problem.ProblemPdfView.as_view(), name='problem_pdf'),
         url(r'^/clone', problem.ProblemClone.as_view(), name='problem_clone'),
-        url(r'^/submit$', problem.problem_submit, name='problem_submit'),
-        url(r'^/resubmit/(?P<submission>\d+)$', problem.problem_submit, name='problem_submit'),
+        url(r'^/submit$', problem.ProblemSubmit.as_view(), name='problem_submit'),
+        url(r'^/resubmit/(?P<submission>\d+)$', problem.ProblemSubmit.as_view(), name='problem_submit'),
 
         url(r'^/rank/', paged_list_view(ranked_submission.RankedSubmissions, 'ranked_submissions')),
         url(r'^/submissions/', paged_list_view(submission.ProblemSubmissions, 'chronological_submissions')),
@@ -155,7 +157,6 @@ urlpatterns = [
     url(r'^submission/(?P<submission>\d+)', include([
         url(r'^$', submission.SubmissionStatus.as_view(), name='submission_status'),
         url(r'^/abort$', submission.abort_submission, name='submission_abort'),
-        url(r'^/html$', submission.single_submission),
     ])),
 
     url(r'^users/', include([
@@ -167,6 +168,8 @@ urlpatterns = [
 
     url(r'^user$', user.UserAboutPage.as_view(), name='user_page'),
     url(r'^edit/profile/$', user.edit_profile, name='user_edit_profile'),
+    url(r'^data/prepare/$', user.UserPrepareData.as_view(), name='user_prepare_data'),
+    url(r'^data/download/$', user.UserDownloadData.as_view(), name='user_download_data'),
     url(r'^user/(?P<user>\w+)', include([
         url(r'^$', user.UserAboutPage.as_view(), name='user_page'),
         url(r'^/solved', include([
@@ -261,6 +264,20 @@ urlpatterns = [
         url(r'^user/info/(\w+)$', api.api_v1_user_info),
         url(r'^user/submissions/(\w+)$', api.api_v1_user_submissions),
         url(r'^user/ratings/(\d+)$', api.api_v1_user_ratings),
+        url(r'^v2/', include([
+            url(r'^contests$', api.api_v2.APIContestList.as_view()),
+            url(r'^contest/(?P<contest>\w+)$', api.api_v2.APIContestDetail.as_view()),
+            url(r'^problems$', api.api_v2.APIProblemList.as_view()),
+            url(r'^problem/(?P<problem>\w+)$', api.api_v2.APIProblemDetail.as_view()),
+            url(r'^users$', api.api_v2.APIUserList.as_view()),
+            url(r'^user/(?P<user>\w+)$', api.api_v2.APIUserDetail.as_view()),
+            url(r'^submissions$', api.api_v2.APISubmissionList.as_view()),
+            url(r'^submission/(?P<submission>\d+)$', api.api_v2.APISubmissionDetail.as_view()),
+            url(r'^organizations$', api.api_v2.APIOrganizationList.as_view()),
+            url(r'^participations$', api.api_v2.APIContestParticipationList.as_view()),
+            url(r'^languages$', api.api_v2.APILanguageList.as_view()),
+            url(r'^judges$', api.api_v2.APIJudgeList.as_view()),
+        ])),
     ])),
 
     url(r'^blog/', paged_list_view(blog.PostList, 'blog_post_list')),
@@ -272,7 +289,7 @@ urlpatterns = [
 
     url(r'^widgets/', include([
         url(r'^rejudge$', widgets.rejudge_submission, name='submission_rejudge'),
-        url(r'^single_submission$', submission.single_submission_query, name='submission_single_query'),
+        url(r'^single_submission$', submission.single_submission, name='submission_single_query'),
         url(r'^submission_testcases$', submission.SubmissionTestCaseQuery.as_view(), name='submission_testcases_query'),
         url(r'^detect_timezone$', widgets.DetectTimezone.as_view(), name='detect_timezone'),
         url(r'^status-table$', status.status_table, name='status_table'),

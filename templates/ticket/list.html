@@ -167,9 +167,6 @@
             };
 
             var user_select2 = {
-                escapeMarkup: function (markup) {
-                    return markup;
-                },
                 templateResult: function (data, container) {
                     return $('<span>')
                         .append($('<img>', {
@@ -251,26 +248,28 @@
         </aside>
 
         <main>
-            {% if page_obj.num_pages > 1 %}
+            {% if page_obj.has_other_pages() %}
                 <div style="margin-bottom:6px; margin-top:3px">{% include "list-pages.html" %}</div>
             {% endif %}
-            <table id="ticket-list" class="table">
-                <thead>
-                <tr>
-                    <th></th>
-                    <th>{{ _('ID') }}</th>
-                    <th>{{ _('Title') }}</th>
-                    <th>{{ _('User') }}</th>
-                    <th>{{ _('Assignees') }}</th>
-                </tr>
-                </thead>
-                <tbody>
-                {% for ticket in tickets %}
-                    {% include "ticket/row.html" %}
-                {% endfor %}
-                </tbody>
-            </table>
-            {% if page_obj.num_pages > 1 %}
+            <div class="h-scrollable-table">
+                <table id="ticket-list" class="table">
+                    <thead>
+                    <tr>
+                        <th></th>
+                        <th>{{ _('ID') }}</th>
+                        <th>{{ _('Title') }}</th>
+                        <th>{{ _('User') }}</th>
+                        <th>{{ _('Assignees') }}</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {% for ticket in tickets %}
+                        {% include "ticket/row.html" %}
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if page_obj.has_other_pages() %}
                 <div style="margin-top:10px">{% include "list-pages.html" %}</div>
             {% endif %}
         </main>

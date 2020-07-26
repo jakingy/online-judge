@@ -12,7 +12,7 @@ from django.utils.translation import gettext_lazy as _, ungettext
 from reversion.admin import VersionAdmin
 
 from django_ace import AceWidget
-from judge.models import Contest, ContestProblem, ContestSubmission, Profile, Rating
+from judge.models import Contest, ContestProblem, ContestSubmission, Profile, Rating, Submission
 from judge.ratings import rate_contest
 from judge.utils.views import NoBatchDeleteMixin
 from judge.widgets import AdminHeavySelect2MultipleWidget, AdminHeavySelect2Widget, AdminMartorWidget, \
@@ -111,7 +111,7 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
     fieldsets = (
         (None, {'fields': ('key', 'name', 'organizers')}),
         (_('Settings'), {'fields': ('is_visible', 'use_clarifications', 'hide_problem_tags', 'hide_scoreboard',
-                                    'run_pretests_only')}),
+                                    'run_pretests_only', 'is_locked')}),
         (_('Scheduling'), {'fields': ('start_time', 'end_time', 'time_limit')}),
         (_('Details'), {'fields': ('description', 'og_image', 'logo_override_image', 'tags', 'summary')}),
         (_('Format'), {'fields': ('format_name', 'format_config', 'problem_label_script')}),
@@ -120,7 +120,9 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
                                   'organizations', 'view_contest_scoreboard')}),
         (_('Justice'), {'fields': ('banned_users',)}),
     )
-    list_display = ('key', 'name', 'is_visible', 'is_rated', 'start_time', 'end_time', 'time_limit', 'user_count')
+    list_display = ('key', 'name', 'is_visible', 'is_rated', 'is_locked', 'start_time', 'end_time', 'time_limit',
+                    'user_count')
+    search_fields = ('key', 'name')
     inlines = [ContestProblemInline]
     actions_on_top = True
     actions_on_bottom = True
@@ -137,6 +139,10 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
             for action in ('make_visible', 'make_hidden'):
                 actions[action] = self.get_action(action)
 
+        if request.user.has_perm('judge.contest_lock'):
+            for action in ('set_locked', 'set_unlocked'):
+                actions[action] = self.get_action(action)
+
         return actions
 
     def get_queryset(self, request):
@@ -150,6 +156,8 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
         readonly = []
         if not request.user.has_perm('judge.contest_rating'):
             readonly += ['is_rated', 'rate_all', 'rate_exclude']
+        if not request.user.has_perm('judge.contest_lock'):
+            readonly += ['is_locked']
         if not request.user.has_perm('judge.contest_access_code'):
             readonly += ['access_code']
         if not request.user.has_perm('judge.create_private_contest'):
@@ -174,6 +182,9 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
         if form.changed_data and any(f in form.changed_data for f in ('format_config', 'format_name')):
             self._rescore(obj.key)
             self._rescored = True
+
+        if form.changed_data and 'is_locked' in form.changed_data:
+            self.set_is_locked(obj, form.cleaned_data['is_locked'])
 
     def save_related(self, request, form, formsets, change):
         super().save_related(request, form, formsets, change)
@@ -209,6 +220,31 @@ class ContestAdmin(NoBatchDeleteMixin, VersionAdmin):
                                              '%d contests successfully marked as hidden.',
                                              count) % count)
     make_hidden.short_description = _('Mark contests as hidden')
+
+    def set_locked(self, request, queryset):
+        for row in queryset:
+            self.set_is_locked(row, True)
+        count = queryset.count()
+        self.message_user(request, ungettext('%d contest successfully locked.',
+                                             '%d contests successfully locked.',
+                                             count) % count)
+    set_locked.short_description = _('Lock contest submissions')
+
+    def set_unlocked(self, request, queryset):
+        for row in queryset:
+            self.set_is_locked(row, False)
+        count = queryset.count()
+        self.message_user(request, ungettext('%d contest successfully unlocked.',
+                                             '%d contests successfully unlocked.',
+                                             count) % count)
+    set_unlocked.short_description = _('Unlock contest submissions')
+
+    def set_is_locked(self, contest, is_locked):
+        with transaction.atomic():
+            contest.is_locked = is_locked
+            contest.save()
+            Submission.objects.filter(contest_object=contest,
+                                      contest__participation__virtual=0).update(is_locked=is_locked)
 
     def get_urls(self):
         return [

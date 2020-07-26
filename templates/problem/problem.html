@@ -126,8 +126,7 @@
     {% endif %}
     <div><a href="{{ url('chronological_submissions', problem.code) }}">{{ _('All submissions') }}</a></div>
     <div><a href="{{ url('ranked_submissions', problem.code) }}">{{ _('Best submissions') }}</a></div>
-    {% if editorial and editorial.is_public and 
-            not (request.user.is_authenticated and request.profile.current_contest) %}
+    {% if (editorial and editorial.is_accessible_by(request.user)) and not request.in_contest %}
         <hr>
         <div><a href="{{ url('problem_editorial', problem.code) }}">{{ _('Read editorial') }}</a></div>
     {% endif %}
@@ -280,7 +279,7 @@
 
 {% block description %}
     {% cache 86400 'problem_html' problem.id MATH_ENGINE LANGUAGE_CODE %}
-        {{ description|markdown("problem", MATH_ENGINE)|reference|str|safe }}
+        {{ description|markdown(problem.markdown_style, MATH_ENGINE)|reference|str|safe }}
     {% endcache %}
 
     {% with license=problem.license %}

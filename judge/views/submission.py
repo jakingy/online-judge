@@ -22,6 +22,7 @@ from django.views.generic import DetailView, ListView
 from judge import event_poster as event
 from judge.highlight_code import highlight_code
 from judge.models import Contest, Language, Problem, ProblemTranslation, Profile, Submission
+from judge.utils.infinite_paginator import InfinitePaginationMixin
 from judge.utils.problems import get_result_data, user_completed_ids, user_editable_ids, user_tester_ids
 from judge.utils.raw_sql import join_sql_subquery, use_straight_join
 from judge.utils.views import DiggPaginatorMixin, TitleMixin
@@ -223,7 +224,7 @@ class SubmissionsListBase(DiggPaginatorMixin, TitleMixin, ListView):
                                                               language=self.request.LANGUAGE_CODE), to_attr='_trans'))
         if self.in_contest:
             queryset = queryset.filter(contest_object=self.contest)
-            if self.contest.hide_scoreboard and self.contest.is_in_contest(self.request.user):
+            if not self.contest.can_see_full_scoreboard(self.request.user):
                 queryset = queryset.filter(user=self.request.profile)
         else:
             queryset = queryset.select_related('contest_object').defer('contest_object__description')
@@ -373,7 +374,7 @@ class ProblemSubmissionsBase(SubmissionsListBase):
                            reverse('problem_detail', args=[self.problem.code]))
 
     def access_check_contest(self, request):
-        if self.in_contest and not self.contest.can_see_scoreboard(request.user):
+        if self.in_contest and not self.contest.can_see_own_scoreboard(request.user):
             raise Http404()
 
     def access_check(self, request):
@@ -446,11 +447,17 @@ class UserProblemSubmissions(ConditionalUserTabMixin, UserMixin, ProblemSubmissi
         return context
 
 
-def single_submission(request, submission_id, show_problem=True):
+def single_submission(request):
     request.no_profile_update = True
-    authenticated = request.user.is_authenticated
-    submission = get_object_or_404(submission_related(Submission.objects.all()), id=int(submission_id))
+    if 'id' not in request.GET or not request.GET['id'].isdigit():
+        return HttpResponseBadRequest()
+    try:
+        show_problem = int(request.GET.get('show_problem', '1'))
+    except ValueError:
+        return HttpResponseBadRequest()
 
+    authenticated = request.user.is_authenticated
+    submission = get_object_or_404(submission_related(Submission.objects.all()), id=int(request.GET['id']))
     if not submission.problem.is_accessible_by(request.user):
         raise Http404()
 
@@ -465,19 +472,12 @@ def single_submission(request, submission_id, show_problem=True):
     })
 
 
-def single_submission_query(request):
-    request.no_profile_update = True
-    if 'id' not in request.GET or not request.GET['id'].isdigit():
-        return HttpResponseBadRequest()
-    try:
-        show_problem = int(request.GET.get('show_problem', '1'))
-    except ValueError:
-        return HttpResponseBadRequest()
-    return single_submission(request, int(request.GET['id']), bool(show_problem))
-
-
-class AllSubmissions(SubmissionsListBase):
+class AllSubmissions(InfinitePaginationMixin, SubmissionsListBase):
     stats_update_interval = 3600
+
+    @property
+    def use_infinite_pagination(self):
+        return not self.in_contest
 
     def get_my_submissions_page(self):
         if self.request.user.is_authenticated:

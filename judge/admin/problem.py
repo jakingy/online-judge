@@ -3,9 +3,9 @@ from operator import attrgetter
 from django import forms
 from django.contrib import admin
 from django.db import transaction
-from django.db.models import Q
 from django.forms import ModelForm
 from django.urls import reverse_lazy
+from django.utils import timezone
 from django.utils.html import format_html
 from django.utils.translation import gettext, gettext_lazy as _, ungettext
 from reversion.admin import VersionAdmin
@@ -110,13 +110,20 @@ class ProblemTranslationInline(admin.StackedInline):
     form = ProblemTranslationForm
     extra = 0
 
+    def has_permission_full_markup(self, request, obj=None):
+        if not obj:
+            return True
+        return request.user.has_perm('judge.problem_full_markup') or not obj.is_full_markup
+
+    has_add_permission = has_change_permission = has_delete_permission = has_permission_full_markup
+
 
 class ProblemAdmin(NoBatchDeleteMixin, VersionAdmin):
     fieldsets = (
         (None, {
             'fields': (
                 'code', 'name', 'is_public', 'is_manually_managed', 'date', 'authors', 'curators', 'testers',
-                'is_organization_private', 'organizations', 'description', 'license',
+                'is_organization_private', 'organizations', 'is_full_markup', 'description', 'license',
             ),
         }),
         (_('Social Media'), {'classes': ('collapse',), 'fields': ('og_image', 'summary')}),
@@ -148,6 +155,9 @@ class ProblemAdmin(NoBatchDeleteMixin, VersionAdmin):
             func, name, desc = self.get_action('make_private')
             actions[name] = (func, name, desc)
 
+        func, name, desc = self.get_action('update_publish_date')
+        actions[name] = (func, name, desc)
+
         return actions
 
     def get_readonly_fields(self, request, obj=None):
@@ -156,6 +166,10 @@ class ProblemAdmin(NoBatchDeleteMixin, VersionAdmin):
             fields += ('is_public',)
         if not request.user.has_perm('judge.change_manually_managed'):
             fields += ('is_manually_managed',)
+        if not request.user.has_perm('judge.problem_full_markup'):
+            fields += ('is_full_markup',)
+            if obj and obj.is_full_markup:
+                fields += ('description',)
         return fields
 
     def show_authors(self, obj):
@@ -171,6 +185,14 @@ class ProblemAdmin(NoBatchDeleteMixin, VersionAdmin):
     def _rescore(self, request, problem_id):
         from judge.tasks import rescore_problem
         transaction.on_commit(rescore_problem.s(problem_id).delay)
+
+    def update_publish_date(self, request, queryset):
+        count = queryset.update(date=timezone.now())
+        self.message_user(request, ungettext("%d problem's publish date successfully updated.",
+                                             "%d problems' publish date successfully updated.",
+                                             count) % count)
+
+    update_publish_date.short_description = _('Set publish date to now')
 
     def make_public(self, request, queryset):
         count = queryset.update(is_public=True)
@@ -193,20 +215,11 @@ class ProblemAdmin(NoBatchDeleteMixin, VersionAdmin):
     make_private.short_description = _('Mark problems as private')
 
     def get_queryset(self, request):
-        queryset = Problem.objects.prefetch_related('authors__user')
-        if request.user.has_perm('judge.edit_all_problem'):
-            return queryset
-
-        access = Q()
-        if request.user.has_perm('judge.edit_public_problem'):
-            access |= Q(is_public=True)
-        if request.user.has_perm('judge.edit_own_problem'):
-            access |= Q(authors__id=request.profile.id) | Q(curators__id=request.profile.id)
-        return queryset.filter(access).distinct() if access else queryset.none()
+        return Problem.get_editable_problems(request.user).prefetch_related('authors__user').distinct()
 
     def has_change_permission(self, request, obj=None):
         if obj is None:
-            return True
+            return request.user.has_perm('judge.edit_own_problem')
         return obj.is_editable_by(request.user)
 
     def formfield_for_manytomany(self, db_field, request=None, **kwargs):

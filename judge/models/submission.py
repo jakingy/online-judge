@@ -83,6 +83,7 @@ class Submission(models.Model):
     is_pretested = models.BooleanField(verbose_name=_('was ran on pretests only'), default=False)
     contest_object = models.ForeignKey('Contest', verbose_name=_('contest'), null=True, blank=True,
                                        on_delete=models.SET_NULL, related_name='+')
+    is_locked = models.BooleanField(verbose_name=_('lock submission'), default=False)
 
     objects = TranslatedProblemForeignKeyQuerySet.as_manager()
 
@@ -114,7 +115,8 @@ class Submission(models.Model):
         return Submission.USER_DISPLAY_CODES.get(self.short_status, '')
 
     def judge(self, *args, **kwargs):
-        judge_submission(self, *args, **kwargs)
+        if not self.is_locked:
+            judge_submission(self, *args, **kwargs)
 
     judge.alters_data = True
 
@@ -124,16 +126,16 @@ class Submission(models.Model):
     abort.alters_data = True
 
     def can_see_detail(self, user):
-        profile = user.profile
         if not user.is_authenticated:
             return False
-        if user.has_perm('judge.view_all_submission'):
+        profile = user.profile
+        if self.problem.is_editable_by(user):
             return True
-        if self.user_id == profile.id:
+        elif user.has_perm('judge.view_all_submission'):
             return True
-        if self.problem.is_editor(profile):
+        elif self.user_id == profile.id:
             return True
-        if (self.problem.is_public or self.problem.testers.filter(id=profile.id).exists()) and \
+        elif (self.problem.is_public or self.problem.testers.filter(id=profile.id).exists()) and \
                 self.problem.submission_set.filter(user_id=profile.id, result='AC',
                                                    points=self.problem.points).exists():
             return True
@@ -188,12 +190,13 @@ class Submission(models.Model):
 
     class Meta:
         permissions = (
-            ('abort_any_submission', 'Abort any submission'),
-            ('rejudge_submission', 'Rejudge the submission'),
-            ('rejudge_submission_lot', 'Rejudge a lot of submissions'),
-            ('spam_submission', 'Submit without limit'),
-            ('view_all_submission', 'View all submission'),
-            ('resubmit_other', "Resubmit others' submission"),
+            ('abort_any_submission', _('Abort any submission')),
+            ('rejudge_submission', _('Rejudge the submission')),
+            ('rejudge_submission_lot', _('Rejudge a lot of submissions')),
+            ('spam_submission', _('Submit without limit')),
+            ('view_all_submission', _('View all submission')),
+            ('resubmit_other', _("Resubmit others' submission")),
+            ('lock_submission', _('Change lock status of submission')),
         )
         verbose_name = _('submission')
         verbose_name_plural = _('submissions')

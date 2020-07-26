@@ -19,6 +19,11 @@ from judge.ratings import rate_contest
 __all__ = ['Contest', 'ContestTag', 'ContestParticipation', 'ContestProblem', 'ContestSubmission', 'Rating']
 
 
+class MinValueOrNoneValidator(MinValueValidator):
+    def compare(self, a, b):
+        return a is not None and b is not None and super().compare(a, b)
+
+
 class ContestTag(models.Model):
     color_validator = RegexValidator('^#(?:[A-Fa-f0-9]{3}){1,2}$', _('Invalid colour.'))
 
@@ -121,6 +126,8 @@ class Contest(models.Model):
                                             help_text='A custom Lua function to generate problem labels. Requires a '
                                                       'single function with an integer parameter, the zero-indexed '
                                                       'contest problem index, and returns a string, the label.')
+    is_locked = models.BooleanField(verbose_name=_('contest lock'), default=False,
+                                    help_text=_('Prevent submissions from this contest from being rejudged.'))
 
     @cached_property
     def format_class(self):
@@ -132,10 +139,13 @@ class Contest(models.Model):
 
     @cached_property
     def get_label_for_problem(self):
+        if not self.problem_label_script:
+            return self.format.get_label_for_problem
+
         def DENY_ALL(obj, attr_name, is_setting):
             raise AttributeError()
         lua = LuaRuntime(attribute_filter=DENY_ALL, register_eval=False, register_builtins=False)
-        return lua.eval(self.problem_label_script or self.format.get_contest_problem_label_script())
+        return lua.eval(self.problem_label_script)
 
     def clean(self):
         # Django will complain if you didn't fill in start_time or end_time, so we don't have to.
@@ -159,18 +169,31 @@ class Contest(models.Model):
             return profile and profile.current_contest is not None and profile.current_contest.contest == self
         return False
 
-    def can_see_scoreboard(self, user):
+    def can_see_own_scoreboard(self, user):
+        if self.can_see_full_scoreboard(user):
+            return True
+        if not self.can_join:
+            return False
+        if not self.show_scoreboard and not self.is_in_contest(user):
+            return False
+        return True
+
+    def can_see_full_scoreboard(self, user):
+        if self.show_scoreboard:
+            return True
         if user.has_perm('judge.see_private_contest'):
             return True
-        if user.is_authenticated and self.organizers.filter(id=user.profile.id).exists():
+        if self.is_editable_by(user):
             return True
-        if not self.is_visible:
-            return False
-        if self.start_time is not None and self.start_time > timezone.now():
-            return False
         if user.is_authenticated and self.view_contest_scoreboard.filter(id=user.profile.id).exists():
             return True
-        if self.hide_scoreboard and not self.is_in_contest(user) and self.end_time > timezone.now():
+        return False
+
+    @cached_property
+    def show_scoreboard(self):
+        if not self.can_join:
+            return False
+        if self.hide_scoreboard and not self.ended:
             return False
         return True
 
@@ -216,12 +239,6 @@ class Contest(models.Model):
         self.save()
 
     update_user_count.alters_data = True
-
-    @cached_property
-    def show_scoreboard(self):
-        if self.hide_scoreboard and not self.ended:
-            return False
-        return True
 
     class Inaccessible(Exception):
         pass
@@ -330,6 +347,7 @@ class Contest(models.Model):
             ('create_private_contest', _('Create private contests')),
             ('change_contest_visibility', _('Change contest visibility')),
             ('contest_problem_label', _('Edit contest problem label script')),
+            ('lock_contest', _('Change lock status of contest')),
         )
         verbose_name = _('contest')
         verbose_name_plural = _('contests')
@@ -436,9 +454,10 @@ class ContestProblem(models.Model):
     order = models.PositiveIntegerField(db_index=True, verbose_name=_('order'))
     output_prefix_override = models.IntegerField(verbose_name=_('output prefix length override'), null=True, blank=True)
     max_submissions = models.IntegerField(help_text=_('Maximum number of submissions for this problem, '
-                                                      'or 0 for no limit.'), default=0,
-                                          validators=[MinValueValidator(0, _('Why include a problem you '
-                                                                             'can\'t submit to?'))])
+                                                      'or leave blank for no limit.'),
+                                          default=None, null=True, blank=True,
+                                          validators=[MinValueOrNoneValidator(1, _('Why include a problem you '
+                                                                                   'can\'t submit to?'))])
 
     class Meta:
         unique_together = ('problem', 'contest')

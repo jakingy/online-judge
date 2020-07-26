@@ -104,6 +104,7 @@ class ContestList(DiggPaginatorMixin, TitleMixin, ContestListMixin, ListView):
         context['future_contests'] = future
         context['now'] = self._now
         context['first_page_href'] = '.'
+        context['page_suffix'] = '#past-contests'
         return context
 
 
@@ -217,6 +218,9 @@ class ContestDetail(ContestMixin, TitleMixin, CommentedDetailView):
             .annotate(has_public_editorial=Sum(Case(When(solution__is_public=True, then=1),
                                                     default=0, output_field=IntegerField()))) \
             .add_i18n_name(self.request.LANGUAGE_CODE)
+        context['contest_has_public_editorials'] = any(
+            problem.is_public and problem.has_public_editorial for problem in context['contest_problems']
+        )
         return context
 
 
@@ -238,6 +242,7 @@ class ContestClone(ContestMixin, PermissionRequiredMixin, TitleMixin, SingleObje
         contest.pk = None
         contest.is_visible = False
         contest.user_count = 0
+        contest.is_locked = False
         contest.key = form.cleaned_data['key']
         contest.save()
 
@@ -587,10 +592,6 @@ def get_contest_ranking_list(request, contest, participation=None, ranking_list=
                              show_current_virtual=True, ranker=ranker):
     problems = list(contest.contest_problems.select_related('problem').defer('problem__description').order_by('order'))
 
-    if contest.hide_scoreboard and contest.is_in_contest(request.user):
-        return ([(_('???'), make_contest_ranking_profile(contest, request.profile.current_contest, problems))],
-                problems)
-
     users = ranker(ranking_list(contest, problems), key=attrgetter('points', 'cumtime', 'tiebreaker'))
 
     if show_current_virtual:
@@ -608,7 +609,7 @@ def contest_ranking_ajax(request, contest, participation=None):
     if not exists:
         return HttpResponseBadRequest('Invalid contest', content_type='text/plain')
 
-    if not contest.can_see_scoreboard(request.user):
+    if not contest.can_see_full_scoreboard(request.user):
         raise Http404()
 
     users, problems = get_contest_ranking_list(request, contest, participation)
@@ -636,7 +637,7 @@ class ContestRankingBase(ContestMixin, TitleMixin, DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
 
-        if not self.object.can_see_scoreboard(self.request.user):
+        if not self.object.can_see_own_scoreboard(self.request.user):
             raise Http404()
 
         users, problems = self.get_ranking_list()
@@ -654,6 +655,14 @@ class ContestRanking(ContestRankingBase):
         return _('%s Rankings') % self.object.name
 
     def get_ranking_list(self):
+        if not self.object.can_see_full_scoreboard(self.request.user):
+            queryset = self.object.users.filter(user=self.request.profile, virtual=ContestParticipation.LIVE)
+            return get_contest_ranking_list(
+                self.request, self.object,
+                ranking_list=partial(base_contest_ranking_list, queryset=queryset),
+                ranker=lambda users, key: ((_('???'), user) for user in users),
+            )
+
         return get_contest_ranking_list(self.request, self.object)
 
     def get_context_data(self, **kwargs):
@@ -671,6 +680,9 @@ class ContestParticipationList(LoginRequiredMixin, ContestRankingBase):
         return _("%s's participation in %s") % (self.profile.username, self.object.name)
 
     def get_ranking_list(self):
+        if not self.object.can_see_full_scoreboard(self.request.user) and self.profile != self.request.profile:
+            raise Http404()
+
         queryset = self.object.users.filter(user=self.profile, virtual__gte=0).order_by('-virtual')
         live_link = format_html('<a href="{2}#!{1}">{0}</a>', _('Live'), self.profile.username,
                                 reverse('contest_ranking', args=[self.object.key]))

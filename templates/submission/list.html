@@ -296,7 +296,7 @@
 {% endblock %}
 
 {% block body %}
-    {% if page_obj.num_pages > 1 %}
+    {% if page_obj.has_other_pages() %}
         <div style="margin-bottom: 6px; margin-top: 11px">
             {% include "list-pages.html" %}
         </div>
@@ -359,13 +359,13 @@
                 {% set profile_id = request.profile.id if request.user.is_authenticated else 0 %}
                 {% for submission in submissions %}
                     <div class="submission-row" id="{{ submission.id }}">
-                        {% with problem_name=show_problem and submission.problem.i18n_name %}
+                        {% with problem_name=show_problem and (submission.problem.i18n_name or submission.problem.name) %}
                             {% include "submission/row.html" %}
                         {% endwith %}
                     </div>
                 {% endfor %}
             </div>
-            {% if page_obj.num_pages > 1 %}
+            {% if page_obj.has_other_pages() %}
                 <div style="margin-top:10px;">{% include "list-pages.html" %}</div>
             {% endif %}
         </div>
